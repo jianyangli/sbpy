@@ -36,7 +36,7 @@ def _process_ephem_input(eph, key=None):
             out = eph[key]
     else:
         out = eph
-        eph = None
+        eph = Ephem({'alpha': eph})
     return eph, out
 
 
@@ -264,6 +264,24 @@ class DiskIntegratedPhaseFunc(Fittable1DModel):
         self.radius = radius
         self.M_sun = M_sun
 
+    def __call__(self, *inputs, **kwargs):
+        self._check_unit()
+        eph, pha = _process_ephem_input(inputs[0], 'alpha')
+        inputs = list(inputs)
+        inputs[0] = pha
+        out = super().__call__(pha, *inputs, **kwargs)
+        if self._unit != 'mag':
+            if self.radius is None:
+                raise ValueError(
+                    'cannot calculate phase funciton in magnitude because the size of object is unknown')
+            out = ref2mag(out, self.radius, M_sun=self.M_sun)
+        else:
+            dist_corr = self._distance_module(eph)
+            if isinstance(out, u.Quantity):
+                dist_corr = dist_corr*u.mag
+            out = out - dist_corr
+        return out
+
     def _check_unit(self):
         if self._unit is None:
             raise ValueError('the unit of phase function is unknown')
@@ -459,19 +477,8 @@ class DiskIntegratedPhaseFunc(Fittable1DModel):
         >>> pha = np.linspace(0, 180, 200)
         >>> mag2 = ceres_hg.mag(np.deg2rad(pha))
         """
-        self._check_unit()
+        out = self(eph, **kwargs)
         eph, pha = _process_ephem_input(eph, 'alpha')
-        out = self(pha, **kwargs)
-        if self._unit != 'mag':
-            if self.radius is None:
-                raise ValueError(
-                    'cannot calculate phase funciton in magnitude because the size of object is unknown')
-            out = ref2mag(out, self.radius, M_sun=self.M_sun)
-        else:
-            dist_corr = self._distance_module(eph)
-            if isinstance(out, u.Quantity):
-                dist_corr = dist_corr*u.mag
-            out = out - dist_corr
         if eph is None:
             eph = Ephem({'alpha': pha, 'mag': out})
         else:
