@@ -19,6 +19,8 @@ from astropy.modeling import (FittableModel, Fittable1DModel,
 import astropy.units as u
 from astropy import log
 from ..data import Ephem, Phys
+from ..exceptions import SbpyException
+from ..units import VEGAmag
 
 
 def _process_ephem_input(eph, key=None):
@@ -234,6 +236,12 @@ class _spline(object):
         return out
 
 
+class ModelParameterUnitError(SbpyException):
+    """Exception to catch the error in specify the unit of model parameter
+    """
+    pass
+
+
 class DiskIntegratedPhaseFunc(Fittable1DModel):
     """Base class for disk-integrated phase function model
 
@@ -270,6 +278,46 @@ class DiskIntegratedPhaseFunc(Fittable1DModel):
     Bond albedo is 0.0184
     >>> print('Phase integral is {0:.3}'.format(phaseint))
     Phase integral is 0.368
+
+    `~astropy.units.Quantity` is enforced both for model parameters when
+    initializing a model class object, and for independent variable when
+    evaluating a model.  The only exception is when a parameter or variable is
+    dimensionless.  The unit of parameters have to be specified in the
+    class definition.  There are two methods to specify the units.
+
+    The first method is to specify a Quantity for the default value of a
+    model parameter, or to defined the ``unit`` optional parameter when define
+    a model parameter though the `~astropy.modeling.Parameter` class:
+
+    >>> class PhaseFuncA(DiskIntegratedPhaseFunc):
+    ...
+    ...     _unit = 'mag'
+    ...     P1 = Parameter(unit=u.mag)
+    ...
+    >>> class PhaseFuncB(DiskIntegratedPhaseFunc):
+    ...
+    ...     _unit = 'mag'
+    ...     P1 = Parameter(default=3*u.mag)
+    ...
+
+    The second method is through an internal class variable
+    ``parameter_units`` as a dict:
+
+    >>> from sbpy.units import VEGAmag
+    >>> class PhaseFuncB(DiskIntegratedPhaseFunc):
+    ...
+    ...     _unit = 'mag'
+    ...     P1 = Parameter(unit=u.mag)
+    ...     parameter_units = {'P1': [u.mag, VEGAmag]}
+    ...
+
+    The advantage of the second method is that one can specify a single unit
+    for each parameter, or allow multiple units by providing a list.
+
+    If both the ``unit`` parameter of a `~astropy.modelig.Parameter` class and
+    the internal variable `parameter_units` are defined for a model parameter,
+    then the compatibility of them will be checked and an
+    `ModelParameterUnitError` will be issued if not compatible.
     """
 
     # Some phase function models are defined in magnitude space, such as the
@@ -282,7 +330,10 @@ class DiskIntegratedPhaseFunc(Fittable1DModel):
     input_units = {'x': u.rad}
 
     # Whether or not the model input is allowed to be dimensionless
-    input_units_allow_dimensionless = {'x': True}
+    input_units_allow_dimensionless = {'x': False}
+
+    # Define the units for parameters
+    parameter_units = {}
 
     def __init__(self, *args, radius=None, M_sun=None, **kwargs):
         """Initialize DiskIntegratedPhaseFunc
@@ -297,7 +348,66 @@ class DiskIntegratedPhaseFunc(Fittable1DModel):
             If not supplied, the V-band solar magnitude assumed.  See
             `~ref2mag` and `~mag2ref`
         """
-        super().__init__(*args, **kwargs)
+
+        # check unit for compatibility
+        #print(f'class name = {self.__class__.__name__}')
+        #print(f'args = {args}, kwargs = {kwargs}')
+
+        # check number of positional arguments
+        self._parameter_units = self.parameter_units.copy()
+        # print(f'self._parameter_units = {self._parameter_units}')
+        npar = len(self.param_names)
+        if len(args) > npar:
+            raise TypeError('{}.__init__() takes at most {} positional'
+                ' argument but {} were given)'.format(self.__class__.__name__,
+                npar, len(args)))
+        # process positional arguments
+        pars = {}
+        for i,v in enumerate(args):
+            if self.param_names[i] in kwargs:
+                raise TypeError('{}.__init__() got multiple values for'
+                    ' parameter ''{}'''.format(self.__class__.__name__,
+                    self.param_names[i]))
+            pars[self.param_names[i]] = v
+        kwargs.update(pars)
+        # process missing arguments
+        for p in self.param_names:
+            if p not in kwargs.keys():
+                raise TypeError('{}.__init__() requires a value for parameter'
+                    ' {}'.format(p))
+        # check parameter unit
+        # print(f'self._parameter_units = {self._parameter_units}')
+        for p in self.param_names:
+            val = kwargs.pop(p, None)
+            if p in self._parameter_units:
+                # defined in self._parameter_units
+                if self._parameter_units[p] is None:
+                    self._parameter_units[p] = u.dimensionless_unscaled
+                if not hasattr(self._parameter_units[p], '__iter__'):
+                    self._parameter_units[p] = [self._parameter_units[p]]
+                if (not isinstance(val, u.Quantity)) and \
+                        np.any([x.is_equivalent(u.dimensionless_unscaled)
+                        for x in self._parameter_units[p]]):
+                    val = val * u.dimensionless_unscaled
+                elif isinstance(val, u.Quantity) and \
+                        np.any([x.is_equivalent(val.unit) for x in
+                        self._parameter_units[p]]):
+                    pass
+                else:
+                    #print(f'val = {val}')
+                    raise ModelParameterUnitError('Incompatible unit for'
+                        ' parameter {}'.format(p))
+            else:
+                # not defined in self._parameter_units, then set it from
+                # parameter value
+                if isinstance(val, u.Quantity):
+                    self._parameter_units[p] = [val.unit]
+                else:
+                    self._parameter_units[p] = [u.dimensionless_unscaled]
+            kwargs[p] = val
+        # initialize model
+        super().__init__(**kwargs)
+        # set additional parameters
         self.radius = radius
         self.M_sun = M_sun
 
